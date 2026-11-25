@@ -59,8 +59,10 @@ import org.testcontainers.utility.DockerImageName;
 @SuppressWarnings("NonFinalStaticField")
 class CollectorIntegrationTest {
 
-  private static final String COLLECTOR_IMAGE =
-      "ghcr.io/open-telemetry/opentelemetry-java/otel-collector";
+  // Pinned to the collector-contrib release current at 1.49.0 (2025-04-04): the floating
+  // ghcr.io/open-telemetry/opentelemetry-java/otel-collector copy of :latest is now >= 0.126.0,
+  // which no longer emits the net.host.name/net.host.port/http.scheme attributes asserted below.
+  private static final String COLLECTOR_IMAGE = "otel/opentelemetry-collector-contrib:0.123.0";
   private static final Integer COLLECTOR_HEALTH_CHECK_PORT = 13133;
 
   private static int prometheusPort;

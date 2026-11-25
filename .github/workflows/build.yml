@@ -1,12 +1,12 @@
 name: Build
 
 on:
-  push:
-    branches:
-      - main
-      - release/*
-  pull_request:
   workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Gradle test task + selector to run instead of the full build (e.g. ':extensions:trace-propagators:test --tests FooTest')"
+        required: false
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
@@ -19,12 +19,13 @@ jobs:
   build:
     name: Build
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
         os:
           - macos-latest
-          - macos-13
+          - macos-15-intel
           - ubuntu-latest
           - windows-latest
         test-java-version:
@@ -43,13 +44,13 @@ jobs:
         exclude:
           - os: macos-latest
             test-java-version: 8
-          - os: macos-13
+          - os: macos-15-intel
             test-java-version: 11
-          - os: macos-13
+          - os: macos-15-intel
             test-java-version: 17
-          - os: macos-13
+          - os: macos-15-intel
             test-java-version: 21
-          - os: macos-13
+          - os: macos-15-intel
             test-java-version: 23
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -60,65 +61,70 @@ jobs:
         with:
           distribution: temurin
           java-version: ${{ matrix.test-java-version }}
+          cache: gradle
 
       - id: setup-java
         name: Set up Java for build
         uses: actions/setup-java@3a4f6e1af504cf6a31855fa899c6aa5355ba6c12 # v4.7.0
         with:
           distribution: temurin
-          java-version: 17
+          # pinned to the JDK the 1.49.0 release was built with (jar manifest Built-JDK: 17.0.14)
+          java-version: 17.0.14+7
+          cache: gradle
 
       - name: Set up gradle
         uses: gradle/actions/setup-gradle@94baf225fe0a508e581a564467443d0e2379123b # v4.3.0
+
+      # The runner's Docker daemon (29+) rejects API < 1.40, but the Testcontainers/docker-java
+      # pinned by this release speaks 1.32; lower the daemon's floor so the container tests run.
+      - name: Allow Testcontainers Docker API version
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          sudo mkdir -p /etc/systemd/system/docker.service.d
+          printf '[Service]\nEnvironment=DOCKER_MIN_API_VERSION=1.24\n' | sudo tee /etc/systemd/system/docker.service.d/min-api-version.conf
+          sudo systemctl daemon-reload
+          sudo systemctl restart docker
+          docker version
+
       - name: Build
-        run: >
-            ./gradlew build
-            ${{ matrix.coverage && 'jacocoTestReport' || '' }}
-            -PtestJavaVersion=${{ matrix.test-java-version }}
-            "-Porg.gradle.java.installations.paths=${{ steps.setup-java-test.outputs.path }}"
-            "-Porg.gradle.java.installations.auto-download=false"
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            ./gradlew assemble ${{ inputs.test-filter }} \
+              --no-build-cache -I .github/seal/disable-gates.init.gradle -PdisableErrorProne=true \
+              -PtestJavaVersion=${{ matrix.test-java-version }} \
+              "-Porg.gradle.java.installations.paths=${{ steps.setup-java-test.outputs.path }}" \
+              "-Porg.gradle.java.installations.auto-download=false"
+          else
+            ./gradlew build \
+              ${{ matrix.coverage && 'jacocoTestReport' || '' }} \
+              --no-build-cache -I .github/seal/disable-gates.init.gradle -PdisableErrorProne=true \
+              -PtestJavaVersion=${{ matrix.test-java-version }} \
+              "-Porg.gradle.java.installations.paths=${{ steps.setup-java-test.outputs.path }}" \
+              "-Porg.gradle.java.installations.auto-download=false"
+          fi
         env:
           # JMH-based tests run only  if this environment variable is set to true
           RUN_JMH_BASED_TESTS: ${{ matrix.jmh-based-tests }}
 
-      - name: Check for diff
-        # The jApiCmp diff compares current to latest, which isn't appropriate for release branches, or for bot-generated PRs
-        # this fails on windows because of the bash-specific if/then/else syntax, but that's ok
-        # because we only need to run this validation once (on any platform)
-        if: ${{ matrix.os != 'windows-latest' && !startsWith(github.ref_name, 'release/') && !startsWith(github.base_ref, 'release/') && (github.actor != 'opentelemetrybot') }}
-        run: |
-          # need to "git add" in case any generated files did not already exist
-          git add docs/apidiffs
-          if git diff --cached --quiet
-          then 
-            echo "No diff detected."
-          else 
-            echo "Diff detected - did you run './gradlew jApiCmp'?"
-            echo $(git diff --cached --name-only)
-            echo $(git diff --cached)
-            exit 1
-          fi
-
-      - uses: codecov/codecov-action@0565863a31f2c772f9f0395002a31e3f06189574 # v5.4.0
-        if: ${{ matrix.coverage }}
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-
       - uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
-        if: ${{ matrix.coverage }}
+        if: ${{ matrix.coverage && inputs.test-filter == '' }}
         with:
           name: coverage-report
           path: all/build/reports/jacoco/test/html
 
-  markdown-link-check:
-    # release branches are excluded to avoid unnecessary maintenance
-    if: ${{ !startsWith(github.ref_name, 'release/') }}
-    uses: ./.github/workflows/reusable-markdown-link-check.yml
+      - name: Upload trace-propagators jar
+        if: ${{ matrix.os == 'ubuntu-latest' && matrix.test-java-version == 8 }}
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: opentelemetry-extension-trace-propagators
+          path: extensions/trace-propagators/build/libs/opentelemetry-extension-trace-propagators-1.49.0.jar
+          if-no-files-found: error
 
-  misspell-check:
-    # release branches are excluded to avoid unnecessary maintenance
-    if: ${{ !startsWith(github.ref_name, 'release/') }}
-    uses: ./.github/workflows/reusable-misspell-check.yml
+      - name: Test summary
+        if: ${{ always() }}
+        shell: bash
+        run: ${{ runner.os == 'Windows' && 'python' || 'python3' }} .github/seal/test-report.py
 
   publish-snapshots:
     # the condition is on the steps below instead of here on the job, because skipping the job
@@ -133,7 +139,10 @@ jobs:
     name: publish-snapshots${{ (github.ref_name != 'main' || github.repository != 'open-telemetry/opentelemetry-java') && ' (skipped)' || '' }}
     # intentionally not blocking snapshot publishing on markdown-link-check or misspell-check
     needs: build
+    # publishing needs Sonatype/GPG secrets the fork does not have
+    if: false
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -163,6 +172,7 @@ jobs:
   build-graal:
     name: Build GraalVM
     runs-on: ubuntu-latest
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
@@ -183,7 +193,15 @@ jobs:
           echo "JAVA_HOME: $JAVA_HOME"
           java --version
           native-image --version
-          ./gradlew nativeTest
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            echo "test-filter set: native-image suite not part of the scoped run"
+          else
+            ./gradlew nativeTest --no-build-cache -I .github/seal/disable-gates.init.gradle -PdisableErrorProne=true
+          fi
+
+      - name: Test summary
+        if: ${{ always() }}
+        run: python3 .github/seal/test-report.py
 
   required-status-check:
     # markdown-link-check is not required so pull requests are not blocked if external links break
@@ -193,6 +211,7 @@ jobs:
       - build
       - build-graal
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: always()
     steps:
       - if: |

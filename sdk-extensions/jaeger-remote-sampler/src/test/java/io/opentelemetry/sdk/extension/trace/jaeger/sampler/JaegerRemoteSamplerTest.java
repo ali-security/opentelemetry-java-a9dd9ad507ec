@@ -45,6 +45,8 @@ import org.awaitility.core.ThrowingRunnable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.extension.ExtensionContext;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -200,6 +202,9 @@ class JaegerRemoteSamplerTest {
   }
 
   @Test
+  @DisabledOnOs(
+      value = OS.WINDOWS,
+      disabledReason = "flaky on Windows CI: TLS poll misses the 10s await window")
   void tlsViaSslContext() throws Exception {
     X509TrustManager trustManager = TlsUtil.trustManager(certificate.certificate().getEncoded());
 

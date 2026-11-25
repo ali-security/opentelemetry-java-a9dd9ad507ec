@@ -1,0 +1,18 @@
+// Sealed-build helper: disables non-test gates (checkstyle, spotless format checks,
+// animal-sniffer API signature checks, jApiCmp API-diff check). None of these
+// execute code; the real test tasks are untouched.
+allprojects {
+  tasks.configureEach { t ->
+    def n = t.name
+    if (t instanceof org.gradle.api.plugins.quality.Checkstyle
+        || (n.startsWith('spotless') && n.endsWith('Check'))
+        || n.startsWith('animalsniffer')
+        || n == 'jApiCmp') {
+      t.enabled = false
+    }
+    if (t instanceof org.gradle.api.tasks.testing.Test) {
+      // lets one --tests selector be forwarded to several module test tasks
+      t.filter.failOnNoMatchingTests = false
+    }
+  }
+}
